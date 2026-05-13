@@ -1,82 +1,196 @@
-# LangGraph ReAct Memory Agent
+# 🧠 Memory Agent — Architecture & Code Analysis
 
-[![CI](https://github.com/langchain-ai/memory-agent/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/langchain-ai/memory-agent/actions/workflows/unit-tests.yml)
-[![Open in - LangGraph Studio](https://img.shields.io/badge/Open_in-LangGraph_Studio-00324d.svg?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4NS4zMzMiIGhlaWdodD0iODUuMzMzIiB2ZXJzaW9uPSIxLjAiIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHBhdGggZD0iTTEzIDcuOGMtNi4zIDMuMS03LjEgNi4zLTYuOCAyNS43LjQgMjQuNi4zIDI0LjUgMjUuOSAyNC41QzU3LjUgNTggNTggNTcuNSA1OCAzMi4zIDU4IDcuMyA1Ni43IDYgMzIgNmMtMTIuOCAwLTE2LjEuMy0xOSAxLjhtMzcuNiAxNi42YzIuOCAyLjggMy40IDQuMiAzLjQgNy42cy0uNiA0LjgtMy40IDcuNkw0Ny4yIDQzSDE2LjhsLTMuNC0zLjRjLTQuOC00LjgtNC44LTEwLjQgMC0xNS4ybDMuNC0zLjRoMzAuNHoiLz48cGF0aCBkPSJNMTguOSAyNS42Yy0xLjEgMS4zLTEgMS43LjQgMi41LjkuNiAxLjcgMS44IDEuNyAyLjcgMCAxIC43IDIuOCAxLjYgNC4xIDEuNCAxLjkgMS40IDIuNS4zIDMuMi0xIC42LS42LjkgMS40LjkgMS41IDAgMi43LS41IDIuNy0xIDAtLjYgMS4xLS44IDIuNi0uNGwyLjYuNy0xLjgtMi45Yy01LjktOS4zLTkuNC0xMi4zLTExLjUtOS44TTM5IDI2YzAgMS4xLS45IDIuNS0yIDMuMi0yLjQgMS41LTIuNiAzLjQtLjUgNC4yLjguMyAyIDEuNyAyLjUgMy4xLjYgMS41IDEuNCAyLjMgMiAyIDEuNS0uOSAxLjItMy41LS40LTMuNS0yLjEgMC0yLjgtMi44LS44LTMuMyAxLjYtLjQgMS42LS41IDAtLjYtMS4xLS4xLTEuNS0uNi0xLjItMS42LjctMS43IDMuMy0yLjEgMy41LS41LjEuNS4yIDEuNi4zIDIuMiAwIC43LjkgMS40IDEuOSAxLjYgMi4xLjQgMi4zLTIuMy4yLTMuMi0uOC0uMy0yLTEuNy0yLjUtMy4xLTEuMS0zLTMtMy4zLTMtLjUiLz48L3N2Zz4=)](https://langgraph-studio.vercel.app/templates/open?githubUrl=https://github.com/langchain-ai/memory-agent)
+> **Repo**: `langchain-ai/memory-agent`  
+> **Stack**: Python 3.11, LangGraph ≥ 1.0, LangChain, Anthropic/OpenAI  
+> **Pattern**: ReAct-style agent with persistent, user-scoped long-term memory
 
-This repo provides a simple example of a ReAct-style agent with a tool to save memories. This is a simple way to let an agent persist important information to reuse later. In this case, we save all memories scoped to a configurable `user_id`, which lets the bot learn a user's preferences across conversational threads.
+---
 
-![Memory Diagram](./static/memory_graph.png)
+## 📁 File Structure
 
-## Getting Started
+```
+memory-agent/
+├── src/memory_agent/         # Core package (7 files)
+│   ├── graph.py              # LangGraph StateGraph definition (main entry)
+│   ├── state.py              # Shared graph state (messages only)
+│   ├── context.py            # Runtime config: user_id, model, system_prompt
+│   ├── tools.py              # upsert_memory tool (the only tool)
+│   ├── prompts.py            # Default SYSTEM_PROMPT template
+│   ├── utils.py              # load_chat_model() helper
+│   └── __init__.py
+├── tests/
+│   ├── unit_tests/           # test_context.py (context validation)
+│   └── integration_tests/   # test_graph.py (3 conversation scenarios)
+├── langgraph.json            # Deployment config (vector store dims, embed model)
+├── pyproject.toml            # Dependencies, ruff, mypy config
+├── .env.example              # ANTHROPIC_API_KEY / OPENAI_API_KEY
+└── README.md
+```
 
-This quickstart will get your memory service deployed on [LangGraph Cloud](https://langchain-ai.github.io/langgraph/cloud/). Once created, you can interact with it from any API.
+---
 
-Assuming you have already [installed LangGraph Studio](https://github.com/langchain-ai/langgraph-studio?tab=readme-ov-file#download), to set up:
+## 🏗️ Architecture Overview
 
-1. Create a `.env` file.
+```mermaid
+flowchart TD
+    START([__start__]) --> CM[call_model]
+    CM -->|has tool_calls| SM[store_memory]
+    CM -->|no tool_calls| END([END])
+    SM --> CM
+
+    subgraph Runtime Context
+        UC[user_id]
+        MOD[model]
+        SP[system_prompt]
+    end
+
+    subgraph LangGraph Store
+        MEM[(memories namespace\nper user_id)]
+    end
+
+    CM -- asearch top-10 memories --> MEM
+    SM -- aput new/updated memory --> MEM
+```
+
+**Flow:**
+1. `call_model` — fetches top-10 semantically relevant memories → injects into system prompt → calls LLM with `upsert_memory` tool bound
+2. `route_message` — if LLM called a tool → go to `store_memory`; else → `END`
+3. `store_memory` — concurrently executes all `upsert_memory` calls via `asyncio.gather` → loops back to `call_model`
+
+---
+
+## 🔍 Module-by-Module Breakdown
+
+### `graph.py` — Core Graph Logic
+| Aspect | Detail |
+|--------|--------|
+| Memory retrieval | `store.asearch(("memories", user_id), query=last_3_msgs, limit=10)` |
+| Model loading | Lazy — new `load_chat_model()` call **on every invocation** |
+| Concurrency | `asyncio.gather` for parallel memory upserts ✅ |
+| Routing | Conditional edge: tool_calls present → store, else → END |
+| Loop-back | `store_memory → call_model` lets model respond after saving |
+
+### `context.py` — Runtime Configuration
+| Field | Default | Env Var Override |
+|-------|---------|-----------------|
+| `user_id` | `"default"` | `USER_ID` |
+| `model` | `anthropic/claude-sonnet-4-5-20250929` | `MODEL` |
+| `system_prompt` | `prompts.SYSTEM_PROMPT` | `SYSTEM_PROMPT` |
+
+> ⚠️ The `__post_init__` pattern auto-reads env vars for any field still at default — clean but silent.
+
+### `tools.py` — `upsert_memory`
+- **Signature**: `content: str, context: str, memory_id?: UUID` (visible to LLM)
+- **Hidden args**: `user_id`, `store` via `InjectedToolArg` — never exposed to the model
+- **Upsert logic**: generates new UUID if `memory_id` is `None`, else overwrites existing key
+- **Namespace**: `("memories", user_id)` — strict per-user isolation ✅
+
+### `langgraph.json` — Deployment
+```json
+"store": {
+  "index": { "dims": 1536, "embed": "openai:text-embedding-3-small" }
+}
+```
+> ⚠️ **Hard dependency on OpenAI embeddings** for the vector store index even if you switch the chat model to Anthropic. Requires `OPENAI_API_KEY` regardless.
+
+---
+
+## ✅ Strengths
+
+| # | Strength | Detail |
+|---|----------|--------|
+| 1 | **Clean separation** | state / context / tools / graph are fully decoupled |
+| 2 | **Concurrent memory writes** | `asyncio.gather` handles multiple tool calls efficiently |
+| 3 | **Per-user memory isolation** | Namespace `("memories", user_id)` prevents cross-user leakage |
+| 4 | **Configurable at runtime** | model, user_id, system_prompt all injectable via Context |
+| 5 | **Semantic memory retrieval** | Vector search over last 3 messages for relevance |
+| 6 | **InjectedToolArg pattern** | Store & user_id hidden from LLM — prevents prompt injection abuse |
+| 7 | **LangSmith integration** | `@ls.unit` decorator auto-syncs eval results |
+
+---
+
+## ⚠️ Issues & Observations
+
+### 🔴 Critical
+
+| Issue | Location | Impact |
+|-------|----------|--------|
+| **Model reloaded every call** | `graph.py:47` — `utils.load_chat_model(model)` inside `call_model` | Performance hit; no caching or reuse of the model instance |
+| **OpenAI embedding required** | `langgraph.json` store config | `OPENAI_API_KEY` must always be set even for Anthropic-only setups |
+| **No error handling in `store_memory`** | `graph.py:63-83` | If `aput` fails, tool call result will be malformed; no try/except |
+
+### 🟡 Medium Priority
+
+| Issue | Location | Detail |
+|-------|----------|--------|
+| **`mypy` effectively disabled** | `pyproject.toml:65` — `ignore_errors = true` | No type safety enforcement |
+| **No memory deletion tool** | `tools.py` | Agent can upsert but never delete stale/wrong memories |
+| **Memory limit is fixed at 10** | `graph.py:29` | Not configurable via context; could miss relevant older memories |
+| **`conftest.py` is minimal** | `tests/conftest.py` | Only 3 lines; no shared fixtures for mock store/context |
+| **Single tool only** | `graph.py:52` | Only `upsert_memory` is bound — no search, delete, or list tools available to the model |
+
+### 🟢 Low Priority / Suggestions
+
+| Suggestion | Rationale |
+|------------|-----------|
+| Cache `load_chat_model()` result | Avoid repeated initialization; use `functools.lru_cache` or module-level singleton |
+| Add `delete_memory` tool | Lets the agent correct and prune outdated memories |
+| Make `limit=10` configurable in `Context` | More flexible for different use cases |
+| Enable mypy strict mode | Current `ignore_errors = true` defeats the purpose of using mypy |
+| Add `user_id` validation | Currently accepts any string including empty `""` |
+
+---
+
+## 🧪 Testing Coverage
+
+| Type | File | Scenarios |
+|------|------|-----------|
+| **Unit** | `test_context.py` | Context field validation |
+| **Integration** | `test_graph.py` | 3 parametrized: short / medium / long conversations |
+
+> Integration tests use `InMemoryStore` + `InMemorySaver` — no external deps needed ✅  
+> Uses LangSmith `ls.expect()` assertions — requires `LANGSMITH_API_KEY` for CI sync
+
+---
+
+## 🚀 How to Run
 
 ```bash
+# 1. Copy env file
 cp .env.example .env
+# Fill in ANTHROPIC_API_KEY (or OPENAI_API_KEY) + LANGSMITH_API_KEY
+
+# 2. Install with uv
+uv sync --dev
+
+# 3. Run locally with LangGraph Studio
+langgraph dev
+
+# 4. Run tests
+pytest tests/unit_tests/
+pytest tests/integration_tests/  # requires API keys
 ```
 
-2. Define required API keys in your `.env` file.
+---
 
-### Setup Model
+## 🗺️ Extension Points (from README)
 
-The defaults values for `model` are shown below:
+| What | How |
+|------|-----|
+| Change memory structure | Edit `upsert_memory` tool schema in `tools.py` |
+| Add more tools | Pass additional tools to `llm.bind_tools([...])` in `graph.py:52` |
+| Switch model | Set `MODEL=openai/gpt-4o` env var or pass via Context |
+| Custom system prompt | Set `SYSTEM_PROMPT` env var or override via Context |
 
-```yaml
-model: anthropic/claude-3-5-sonnet-20240620
-```
+---
 
-Follow the instructions below to get set up, or pick one of the additional options.
+## 📊 Summary Score
 
-#### Anthropic
-
-To use Anthropic's chat models:
-
-1. Sign up for an [Anthropic API key](https://console.anthropic.com/) if you haven't already.
-2. Once you have your API key, add it to your `.env` file:
-
-```
-ANTHROPIC_API_KEY=your-api-key
-```
-
-#### OpenAI
-
-To use OpenAI's chat models:
-
-1. Sign up for an [OpenAI API key](https://platform.openai.com/signup).
-2. Once you have your API key, add it to your `.env` file:
-
-```
-OPENAI_API_KEY=your-api-key
-```
-
-3. Open in LangGraph studio. Navigate to the `memory_agent` graph and have a conversation with it! Try sending some messages saying your name and other things the bot should remember.
-
-Assuming the bot saved some memories, create a _new_ thread using the `+` icon. Then chat with the bot again - if you've completed your setup correctly, the bot should now have access to the memories you've saved!
-
-You can review the saved memories by clicking the "memory" button.
-
-![Memories Explorer](./static/memories.png)
-
-## How it works
-
-This chat bot reads from your memory graph's `Store` to easily list extracted memories. If it calls a tool, LangGraph will route to the `store_memory` node to save the information to the store.
-
-## How to evaluate
-
-Memory management can be challenging to get right, especially if you add additional tools for the bot to choose between.
-To tune the frequency and quality of memories your bot is saving, we recommend starting from an evaluation set, adding to it over time as you find and address common errors in your service.
-
-We have provided a few example evaluation cases in [the test file here](./tests/integration_tests/test_graph.py). As you can see, the metrics themselves don't have to be terribly complicated, especially not at the outset.
-
-We use [LangSmith's @unit decorator](https://docs.smith.langchain.com/how_to_guides/evaluation/unit_testing#write-a-test) to sync all the evaluations to LangSmith so you can better optimize your system and identify the root cause of any issues that may arise.
-
-## How to customize
-
-1. Customize memory content: we've defined a simple memory structure `content: str, context: str` for each memory, but you could structure them in other ways.
-2. Provide additional tools: the bot will be more useful if you connect it to other functions.
-3. Select a different model: We default to anthropic/claude-3-5-sonnet-20240620. You can select a compatible chat model using provider/model-name via configuration. Example: openai/gpt-4.
-4. Customize the prompts: We provide a default prompt in the [prompts.py](src/memory_agent/prompts.py) file. You can easily update this via configuration.
+| Category | Score | Notes |
+|----------|-------|-------|
+| Architecture clarity | 9/10 | Extremely clean 3-node graph |
+| Code quality | 7/10 | No error handling in store_memory; mypy disabled |
+| Test coverage | 6/10 | Good integration tests; minimal unit coverage |
+| Extensibility | 8/10 | Context + tool pattern makes customization easy |
+| Production readiness | 6/10 | Missing: model caching, memory deletion, error boundaries |
+| **Overall** | **7.2/10** | Excellent learning template; needs hardening for production |
